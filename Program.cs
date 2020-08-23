@@ -4,8 +4,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace BlackCloverPreprocessing
 {
@@ -16,6 +18,10 @@ namespace BlackCloverPreprocessing
             return list.Count != 0 ? list[list.Count - 1] : null;
         }
 
+        public static string Join(this string[] list, char aJoinChar)
+        {
+            return String.Join(aJoinChar, list);
+        }
 
         public static string Join(this List<string> list)
         {
@@ -28,9 +34,16 @@ namespace BlackCloverPreprocessing
             return list;
         }
 
+        public static void WaitAndCheck(this Process process)
+        {
+            process.WaitForExit();
+            Trace.Assert(process.ExitCode == 0);
+        }
+
         public static void WaitAndClear(this List<Process> list)
         {
             list.ForEach(extraction => extraction.WaitForExit());
+            list.ForEach(process => Trace.Assert(process.ExitCode == 0));
             list.Clear();
         }
     }
@@ -64,12 +77,12 @@ namespace BlackCloverPreprocessing
 
         static string GetCodec(TrackType aType, List<string> aTrackPropset)
         {
-            return aTrackPropset[cCodecPosition[aType]].Split(' ')[2];
+            return aTrackPropset[cCodecPosition[aType]].Split(' ')[2].Trim().Substring(2);
         }
 
         static string GetLanguage(TrackType aType, List<string> aTrackPropset)
         {
-            return aTrackPropset[cLanguagePosition[aType]].Split(' ')[1];
+            return aTrackPropset[cLanguagePosition[aType]].Split(' ')[1].Trim();
         }
 
         public int TrackNumber;
@@ -109,11 +122,18 @@ namespace BlackCloverPreprocessing
 
     class MkvInfo
     {
-        public MkvInfo(List<string> aTracks)
+        public MkvInfo(string aFile, List<string> aTracks)
         {
             mVideoInfos = new List<VideoInfo>();
             mAudioInfos = new List<AudioInfo>();
             mSubtitleInfos = new List<SubtitleInfo>();
+
+            FileName = aFile;
+            EpisodeName = Path.GetFileNameWithoutExtension(aFile);
+            IntermediateEpisodeFolder = Path.Combine("D:\\BlackCloverFanEdit\\2_Intermediate\\", EpisodeName);
+            ReadyToEditEpisodeFolder = Path.Combine("D:\\BlackCloverFanEdit\\3_ReadyToEdit\\", EpisodeName);
+            IntermediateFilePath = Path.Combine(IntermediateEpisodeFolder, Path.GetFileNameWithoutExtension(aFile));
+            FinalFilePath = Path.Combine(ReadyToEditEpisodeFolder, Path.GetFileNameWithoutExtension(aFile));
 
             foreach (var track in aTracks)
             {
@@ -130,39 +150,79 @@ namespace BlackCloverPreprocessing
             }
         }
 
-        public List<VideoInfo> mVideoInfos;
-        public List<AudioInfo> mAudioInfos;
-        public List<SubtitleInfo> mSubtitleInfos;
-    }
-
-
-
-    class Program
-    {
-
-        static MkvInfo GetMkvInfo(string aFile)
+        public void Process()
         {
-            var builder = new StringBuilder();
-            var process = RunProcess("mkvinfo", aFile, builder);
-            process.WaitForExit();
-            var tracks = builder
-                .ToString()
-                .Split("\r\n")
-                .ToList()
-                .RemoveAllOf(line => line.StartsWith("| + EBML void: "))
-                .Join()
-                .Split("|+ ")
-                .First(line => line.StartsWith("Tracks"))
-                .Split("| + Track\r\n")
-                .ToList();
+            Directory.CreateDirectory(IntermediateEpisodeFolder);
+            Directory.CreateDirectory(ReadyToEditEpisodeFolder);
 
-            // First one is just the beginning of the track section.
-            tracks.RemoveAt(0);
+            List<Task> tasks = new List<Task>();
 
-            return new MkvInfo(tracks); ;
+            foreach (var subtitleTrack in mSubtitleInfos)
+                tasks.Add(Task.Run(() => ProcessTrack(subtitleTrack)));
+            foreach (var audioTrack in mAudioInfos)
+                tasks.Add(Task.Run(() => ProcessTrack(audioTrack)));
+            foreach (var videoTrack in mVideoInfos)
+                tasks.Add(Task.Run(() => ProcessTrack(videoTrack)));
+
+            Task.WaitAll(tasks.ToArray());
+
+            Directory.Delete(IntermediateEpisodeFolder, true);
         }
 
-        static Process RunProcess(string aProgram, string aCommandLine, StringBuilder stringBuilder = null)
+        ////////////////////////////////////////////////////////////////
+        // Video
+        void ProcessTrack(VideoInfo aTrack)
+        {
+            var codecSanitized = $"({aTrack.mMediaInfo.TrackCodec.Replace('\\', '/').Split('/').Join('_')})";
+            var langSanitized = $"({aTrack.mMediaInfo.Language.Replace('\\', '/').Split('/').Join('_')})";
+
+            ////////////////////////////////////////////////////////////////
+            // Extract our video track (id: 0 all files)
+            var mkvPath = $"{IntermediateFilePath}_Lang_{langSanitized}_Codec_{codecSanitized}_Track_{aTrack.mMediaInfo.TrackNumber}.mkv";
+            RunProcess("mkvmerge", $"-o {mkvPath} --no-audio --no-subtitles {FileName}").WaitAndCheck();
+
+            ////////////////////////////////////////////////////////////////
+            // Convert MKV to MP4
+            var mp4Path = $"{FinalFilePath}_Lang_{aTrack.mMediaInfo.Language}_Codec_{codecSanitized}_Track_{aTrack.mMediaInfo.TrackNumber}.mp4";
+            RunProcess("ffmpeg", $"-i {mkvPath} -c copy {mp4Path}").WaitAndCheck();
+        }
+
+        ////////////////////////////////////////////////////////////////
+        // Audio
+        void ProcessTrack(AudioInfo aTrack)
+        {
+            var codecSanitized = $"({aTrack.mMediaInfo.TrackCodec.Replace('\\', '/').Split('/').Join('_')})";
+            var langSanitized = $"({aTrack.mMediaInfo.Language.Replace('\\', '/').Split('/').Join('_')})";
+            var codec = cBlurayCodecToOutputCodec[aTrack.mMediaInfo.TrackCodec];
+
+            ////////////////////////////////////////////////////////////////
+            // Extract out Bluray track
+            var blurayAudioPath = $"{IntermediateFilePath}_Lang_{langSanitized}_Codec_{codecSanitized}_Track_{aTrack.mMediaInfo.TrackNumber}.truehd";
+            RunProcess("mkvextract", $"\"{FileName}\" tracks {aTrack.mMediaInfo.TrackNumber}:{blurayAudioPath}").WaitAndCheck();
+
+            ////////////////////////////////////////////////////////////////
+            // Convert Bluray audio tracks to FLAC
+            var flacPath = Path.ChangeExtension(blurayAudioPath, ".flac").Replace("2_Intermediate", "3_ReadyToEdit");
+            RunProcess("ffmpeg", $"-analyzeduration 30000000 -acodec {codec} -i {blurayAudioPath} -vn -sn -acodec flac {flacPath}").WaitAndCheck();
+        }
+        
+        ////////////////////////////////////////////////////////////////
+        // Subtitles
+        void ProcessTrack(SubtitleInfo aTrack)
+        {
+            ////////////////////////////////////////////////////////////////
+            // Extract sup files
+            var supPath = $"{IntermediateFilePath}_Track_{aTrack.mMediaInfo.TrackNumber}.sup";
+            RunProcess("mkvextract", $"\"{FileName}\" tracks {aTrack.mMediaInfo.TrackNumber}:{supPath}").WaitAndCheck();
+
+            ////////////////////////////////////////////////////////////////
+            // Convert sup files to SRT
+            string pgsApp = "\"C:\\Program Files\\PgsToSrt\\PgsToSrt.dll\"";
+            string srtFile = Path.ChangeExtension(supPath, ".srt").Replace("2_Intermediate", "3_ReadyToEdit");
+            RunProcess("dotnet", $"{pgsApp} --input {supPath} --output {srtFile} --tesseractlanguage eng").WaitAndCheck();
+        }
+
+        public static Process RunProcess(string aProgram, string aCommandLine, StringBuilder stringBuilder = null)
         {
             Console.WriteLine($"{aProgram} {aCommandLine}");
 
@@ -182,90 +242,44 @@ namespace BlackCloverPreprocessing
             return process;
         }
 
-        static void DtsToFlac(string aFile)
+        static readonly Dictionary<string, string> cBlurayCodecToOutputCodec = new Dictionary<string, string> {
+                { "TRUEHD", "truehd" },
+                { "AC3" , "ac3" }
+        };
+
+        public List<VideoInfo> mVideoInfos;
+        public List<AudioInfo> mAudioInfos;
+        public List<SubtitleInfo> mSubtitleInfos;
+        public string FileName;
+        public string EpisodeName;
+        public string IntermediateEpisodeFolder;
+        public string ReadyToEditEpisodeFolder;
+        public string IntermediateFilePath;
+        public string FinalFilePath;
+    }
+
+    class Program
+    {
+        static MkvInfo GetMkvInfo(string aFile)
         {
-            string episodeName = Path.GetFileNameWithoutExtension(aFile);
-            string intermediateEpisodeFolder = Path.Combine("D:\\BlackCloverFanEdit\\2_Intermediate\\", episodeName);
-            string readyToEditEpisodeFolder = Path.Combine("D:\\BlackCloverFanEdit\\3_ReadyToEdit\\", episodeName);
-            string intermediateFilePath = Path.Combine(intermediateEpisodeFolder, Path.GetFileNameWithoutExtension(aFile));
-            string finalFilePath = Path.Combine(readyToEditEpisodeFolder, Path.GetFileNameWithoutExtension(aFile));
+            var builder = new StringBuilder();
+            var process = MkvInfo.RunProcess("mkvinfo", aFile, builder);
+            process.WaitForExit();
+            var tracks = builder
+                .ToString()
+                .Split("\r\n")
+                .ToList()
+                .RemoveAllOf(line => line.StartsWith("| + EBML void: "))
+                .Join()
+                .Split("|+ ")
+                .First(line => line.StartsWith("Tracks"))
+                .Split("| + Track\r\n")
+                .ToList();
 
-            var mkvInfo = GetMkvInfo(aFile);
-            return;
+            // First one is just the beginning of the track section.
+            tracks.RemoveAt(0);
 
-            Directory.CreateDirectory(intermediateEpisodeFolder);
-            Directory.CreateDirectory(readyToEditEpisodeFolder);
-
-            var processes = new List<Process>();
-
-            ////////////////////////////////////////////////////////////////
-            // Subtitles
-            {
-                ////////////////////////////////////////////////////////////////
-                // Extract sup files
-                var supPaths = new List<string>();
-                foreach (var track in mkvInfo.mSubtitleInfos)
-                {
-                    supPaths.Add($"{intermediateFilePath}_Track_{track.mMediaInfo.TrackNumber}.sup");
-                    processes.Add(RunProcess("mkvextract", $"\"{aFile}\" tracks {track.mMediaInfo.TrackNumber}:{supPaths.Back()}"));
-                }
-
-                processes.WaitAndClear();
-
-                ////////////////////////////////////////////////////////////////
-                // Convert sup files to SRT
-                string pgsApp = "\"C:\\Program Files\\PgsToSrt\\PgsToSrt.dll\"";
-                foreach (var supFile in supPaths)
-                {
-                    string srtFile = Path.ChangeExtension(supFile, ".srt").Replace("2_Intermediate", "3_ReadyToEdit");
-                    processes.Add(RunProcess("dotnet", $"{pgsApp} --input {supFile} --output {srtFile} --tesseractlanguage eng"));
-                }
-
-                processes.WaitAndClear();
-            }
-
-            ////////////////////////////////////////////////////////////////
-            // Audio
-            {
-                ////////////////////////////////////////////////////////////////
-                // Extract out TrueHD track (id: 1 all files)
-                var trueHdPaths = new List<string>();
-                foreach (var track in new List<int> { 1, 3 })
-                {
-                    var trueHdPath = $"{intermediateFilePath}_Track_{track}.truehd";
-                    processes.Add(RunProcess("mkvextract", $"\"{aFile}\" tracks {track}:{trueHdPath}"));
-                    trueHdPaths.Add(trueHdPath);
-                }
-
-                processes.WaitAndClear();
-
-                ////////////////////////////////////////////////////////////////
-                // Convert TrueHD tracks to FLAC
-                var flacPaths = new List<string>();
-                foreach (var trueHdPath in trueHdPaths)
-                {
-                    var flacPath = Path.ChangeExtension(trueHdPath, ".flac").Replace("2_Intermediate", "3_ReadyToEdit");
-                    processes.Add(RunProcess("ffmpeg", $"-analyzeduration 30000000 -acodec truehd -i {trueHdPath} -vn -sn -acodec flac {flacPath}"));
-                }
-
-                processes.WaitAndClear();
-            }
-
-            ////////////////////////////////////////////////////////////////
-            // Video
-            {
-                ////////////////////////////////////////////////////////////////
-                // Extract our video track (id: 0 all files)
-                var mkvPath = $"{intermediateFilePath}_Track_0.mkv";
-                RunProcess("mkvmerge", $"-o {mkvPath} --no-audio --no-subtitles {aFile}").WaitForExit();
-
-                ////////////////////////////////////////////////////////////////
-                // Convert MKV to MP4
-                var mp4Path = $"{finalFilePath}_Track_0.mp4";
-                RunProcess("ffmpeg", $"-i {mkvPath} -c copy {mp4Path}").WaitForExit();
-            }
-
-            Directory.Delete(intermediateEpisodeFolder, true);
+            return new MkvInfo(aFile, tracks); ;
         }
 
         static int EpisodeRange(int start, int end)
@@ -537,10 +551,25 @@ namespace BlackCloverPreprocessing
             //    File.Move(files[episode], filesToProcess.Back());
             //}
 
+            var codecSet = new SortedSet<string>();
+
             foreach (var file in GetFileListToProcess())
             {
-                DtsToFlac(file);
+                var mkvInfo = GetMkvInfo(file);
+
+                foreach (var videoTrack in mkvInfo.mVideoInfos)
+                    codecSet.Add(videoTrack.mMediaInfo.TrackCodec);
+
+                foreach (var audioTrack in mkvInfo.mAudioInfos)
+                    codecSet.Add(audioTrack.mMediaInfo.TrackCodec);
+
+                foreach (var subtitleTrack in mkvInfo.mSubtitleInfos)
+                    codecSet.Add(subtitleTrack.mMediaInfo.TrackCodec);
+
+                mkvInfo.Process();
             }
+
+            Directory.Delete("D:\\BlackCloverFanEdit\\2_Intermediate\\", true);
         }
     }
 }
