@@ -1,4 +1,5 @@
 ﻿using ByteSizeLib;
+using Mono.Options;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -46,6 +47,18 @@ namespace BlackCloverPreprocessing
             list.ForEach(process => Trace.Assert(process.ExitCode == 0));
             list.Clear();
         }
+    }
+
+    class MediaConversionOptions
+    {
+        public MediaConversionOptions() { }
+        public string rootPath = null;
+        public bool disableVideo = false;
+        public bool disableVideoConversion = false;
+        public bool disableAudio = false;
+        public bool disableAudioConversion = false;
+        public bool disableSubtitles = false;
+        public bool disableSubtitleConversion = false;
     }
 
     // Common Properties
@@ -122,7 +135,7 @@ namespace BlackCloverPreprocessing
 
     class MkvInfo
     {
-        public MkvInfo(string aFile, List<string> aTracks)
+        public MkvInfo(string aFile, List<string> aTracks, MediaConversionOptions aOptions)
         {
             mVideoInfos = new List<VideoInfo>();
             mAudioInfos = new List<AudioInfo>();
@@ -130,8 +143,8 @@ namespace BlackCloverPreprocessing
 
             FileName = aFile;
             EpisodeName = Path.GetFileNameWithoutExtension(aFile);
-            IntermediateEpisodeFolder = Path.Combine("D:\\BlackCloverFanEdit\\2_Intermediate\\", EpisodeName);
-            ReadyToEditEpisodeFolder = Path.Combine("D:\\BlackCloverFanEdit\\3_ReadyToEdit\\", EpisodeName);
+            IntermediateEpisodeFolder = Path.Combine(aOptions.rootPath, "2_Intermediate", EpisodeName);
+            ReadyToEditEpisodeFolder = Path.Combine(aOptions.rootPath, "3_ReadyToEdit", EpisodeName);
             IntermediateFilePath = Path.Combine(IntermediateEpisodeFolder, Path.GetFileNameWithoutExtension(aFile));
             FinalFilePath = Path.Combine(ReadyToEditEpisodeFolder, Path.GetFileNameWithoutExtension(aFile));
 
@@ -150,28 +163,31 @@ namespace BlackCloverPreprocessing
             }
         }
 
-        public void Process()
+        public void Process(MediaConversionOptions aOptions)
         {
             Directory.CreateDirectory(IntermediateEpisodeFolder);
             Directory.CreateDirectory(ReadyToEditEpisodeFolder);
 
             List<Task> tasks = new List<Task>();
 
-            foreach (var subtitleTrack in mSubtitleInfos)
-                tasks.Add(Task.Run(() => ProcessTrack(subtitleTrack)));
-            foreach (var audioTrack in mAudioInfos)
-                tasks.Add(Task.Run(() => ProcessTrack(audioTrack)));
-            foreach (var videoTrack in mVideoInfos)
-                tasks.Add(Task.Run(() => ProcessTrack(videoTrack)));
+            if (!aOptions.disableSubtitles)
+                foreach (var subtitleTrack in mSubtitleInfos)
+                    tasks.Add(Task.Run(() => ProcessTrack(subtitleTrack, aOptions)));
+
+            if (!aOptions.disableAudio)
+                foreach (var audioTrack in mAudioInfos)
+                    tasks.Add(Task.Run(() => ProcessTrack(audioTrack, aOptions)));
+
+            if (!aOptions.disableVideo)
+                foreach (var videoTrack in mVideoInfos)
+                    tasks.Add(Task.Run(() => ProcessTrack(videoTrack, aOptions)));
 
             Task.WaitAll(tasks.ToArray());
-
-            Directory.Delete(IntermediateEpisodeFolder, true);
         }
 
         ////////////////////////////////////////////////////////////////
         // Video
-        void ProcessTrack(VideoInfo aTrack)
+        void ProcessTrack(VideoInfo aTrack, MediaConversionOptions aOptions)
         {
             var codecSanitized = $"({aTrack.mMediaInfo.TrackCodec.Replace('\\', '/').Split('/').Join('_')})";
             var langSanitized = $"({aTrack.mMediaInfo.Language.Replace('\\', '/').Split('/').Join('_')})";
@@ -183,13 +199,16 @@ namespace BlackCloverPreprocessing
 
             ////////////////////////////////////////////////////////////////
             // Convert MKV to MP4
-            var mp4Path = $"{FinalFilePath}_Lang_{aTrack.mMediaInfo.Language}_Codec_{codecSanitized}_Track_{aTrack.mMediaInfo.TrackNumber}.mp4";
-            RunProcess("ffmpeg", $"-i {mkvPath} -c copy {mp4Path}").WaitAndCheck();
+            if (!aOptions.disableVideoConversion)
+            {
+                var mp4Path = $"{FinalFilePath}_Lang_{aTrack.mMediaInfo.Language}_Codec_{codecSanitized}_Track_{aTrack.mMediaInfo.TrackNumber}.mp4";
+                RunProcess("ffmpeg", $"-i {mkvPath} -c copy {mp4Path}").WaitAndCheck();
+            }
         }
 
         ////////////////////////////////////////////////////////////////
         // Audio
-        void ProcessTrack(AudioInfo aTrack)
+        void ProcessTrack(AudioInfo aTrack, MediaConversionOptions aOptions)
         {
             var codecSanitized = $"({aTrack.mMediaInfo.TrackCodec.Replace('\\', '/').Split('/').Join('_')})";
             var langSanitized = $"({aTrack.mMediaInfo.Language.Replace('\\', '/').Split('/').Join('_')})";
@@ -202,13 +221,16 @@ namespace BlackCloverPreprocessing
 
             ////////////////////////////////////////////////////////////////
             // Convert Bluray audio tracks to FLAC
-            var flacPath = Path.ChangeExtension(blurayAudioPath, ".flac").Replace("2_Intermediate", "3_ReadyToEdit");
-            RunProcess("ffmpeg", $"-analyzeduration 30000000 -acodec {codec} -i {blurayAudioPath} -vn -sn -acodec flac {flacPath}").WaitAndCheck();
+            if (!aOptions.disableAudioConversion)
+            {
+                var flacPath = Path.ChangeExtension(blurayAudioPath, ".flac").Replace("2_Intermediate", "3_ReadyToEdit");
+                RunProcess("ffmpeg", $"-analyzeduration 30000000 -acodec {codec} -i {blurayAudioPath} -vn -sn -acodec flac {flacPath}").WaitAndCheck();
+            }
         }
         
         ////////////////////////////////////////////////////////////////
         // Subtitles
-        void ProcessTrack(SubtitleInfo aTrack)
+        void ProcessTrack(SubtitleInfo aTrack, MediaConversionOptions aOptions)
         {
             ////////////////////////////////////////////////////////////////
             // Extract sup files
@@ -217,9 +239,12 @@ namespace BlackCloverPreprocessing
 
             ////////////////////////////////////////////////////////////////
             // Convert sup files to SRT
-            string pgsApp = "\"C:\\Program Files\\PgsToSrt\\PgsToSrt.dll\"";
-            string srtFile = Path.ChangeExtension(supPath, ".srt").Replace("2_Intermediate", "3_ReadyToEdit");
-            RunProcess("dotnet", $"{pgsApp} --input {supPath} --output {srtFile} --tesseractlanguage eng").WaitAndCheck();
+            if (!aOptions.disableSubtitleConversion)
+            {
+                string pgsApp = "\"C:\\Program Files\\PgsToSrt\\PgsToSrt.dll\"";
+                string srtFile = Path.ChangeExtension(supPath, ".srt").Replace("2_Intermediate", "3_ReadyToEdit");
+                RunProcess("dotnet", $"{pgsApp} --input {supPath} --output {srtFile} --tesseractlanguage eng").WaitAndCheck();
+            }
         }
 
         public static Process RunProcess(string aProgram, string aCommandLine, StringBuilder stringBuilder = null)
@@ -260,7 +285,7 @@ namespace BlackCloverPreprocessing
 
     class Program
     {
-        static MkvInfo GetMkvInfo(string aFile)
+        static MkvInfo GetMkvInfo(string aFile, MediaConversionOptions aOptions)
         {
             var builder = new StringBuilder();
             var process = MkvInfo.RunProcess("mkvinfo", aFile, builder);
@@ -279,7 +304,7 @@ namespace BlackCloverPreprocessing
             // First one is just the beginning of the track section.
             tracks.RemoveAt(0);
 
-            return new MkvInfo(aFile, tracks); ;
+            return new MkvInfo(aFile, tracks, aOptions);
         }
 
         static int EpisodeRange(int start, int end)
@@ -516,9 +541,9 @@ namespace BlackCloverPreprocessing
             return files;
         }
 
-        static List<string> GetFileListToProcess()
+        static List<string> GetFileListToProcess(MediaConversionOptions aOptions)
         {
-            return Directory.GetFiles("D:\\BlackCloverFanEdit\\1_ToBeProcessed\\").OrderBy(file => file).ToList();
+            return Directory.GetFiles(Path.Combine(aOptions.rootPath, "1_ToBeProcessed")).OrderBy(file => file).ToList();
         }
 
         static void Main(string[] args)
@@ -550,12 +575,38 @@ namespace BlackCloverPreprocessing
             //    Console.WriteLine($"        Moving file from {files[episode]} to {filesToProcess.Back()}");
             //    File.Move(files[episode], filesToProcess.Back());
             //}
+            // these are the available options, note that they set the variables
+            var mediaOptions = new MediaConversionOptions();
+
+            var optionsSet = new OptionSet {
+                { "r|root=", "Root path that contains the folders we'll be processing.", r => mediaOptions.rootPath = r },
+                { "dv|no-video", "Don't do video processing", h => mediaOptions.disableVideo = h != null },
+                { "dvc|no-video-conversion", "Don't do video conversion", h => mediaOptions.disableVideoConversion = h != null },
+                { "da|no-audio", "Don't do audio processing", h => mediaOptions.disableAudio = h != null },
+                { "dac|no-audio-conversion", "Don't do video conversion", h => mediaOptions.disableAudioConversion = h != null },
+                { "ds|no-subtitle", "Don't do subtitle processing", h => mediaOptions.disableSubtitles = h != null },
+                { "dsc|no-subtitle-conversion", "Don't do subtitle conversion", h => mediaOptions.disableSubtitleConversion = h != null },
+            };
+
+            try
+            {
+                // parse the command line
+                var extra = optionsSet.Parse(args);
+            }
+            catch (OptionException e)
+            {
+                // output some error message
+                Console.Write("greet: ");
+                Console.WriteLine(e.Message);
+                Console.WriteLine("Try `greet --help' for more information.");
+                return;
+            }
 
             var codecSet = new SortedSet<string>();
 
-            foreach (var file in GetFileListToProcess())
+            foreach (var file in GetFileListToProcess(mediaOptions))
             {
-                var mkvInfo = GetMkvInfo(file);
+                var mkvInfo = GetMkvInfo(file, mediaOptions);
 
                 foreach (var videoTrack in mkvInfo.mVideoInfos)
                     codecSet.Add(videoTrack.mMediaInfo.TrackCodec);
@@ -566,10 +617,8 @@ namespace BlackCloverPreprocessing
                 foreach (var subtitleTrack in mkvInfo.mSubtitleInfos)
                     codecSet.Add(subtitleTrack.mMediaInfo.TrackCodec);
 
-                mkvInfo.Process();
+                mkvInfo.Process(mediaOptions);
             }
-
-            Directory.Delete("D:\\BlackCloverFanEdit\\2_Intermediate\\", true);
         }
     }
 }

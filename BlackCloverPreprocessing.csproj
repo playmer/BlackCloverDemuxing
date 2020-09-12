@@ -3,10 +3,12 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>netcoreapp3.1</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="ByteSize" Version="2.0.0" />
+    <PackageReference Include="Mono.Options" Version="6.6.0.161" />
   </ItemGroup>
 
 </Project>

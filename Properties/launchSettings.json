@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "BlackCloverPreprocessing": {
+      "commandName": "Project",
+      "commandLineArgs": "-r D:\\\\BlackCloverFanEdit -dsc -da -dv"
+    }
+  }
+}
